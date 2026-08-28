@@ -101,6 +101,7 @@ from .ref2va_independent import (
     cache_owner_id as _ref2va_independent_cache_owner_id,
     run as _run_ref2va_independent,
 )
+from .upscale_conditioning import _make_upscaled_conditioning
 
 BUILD = "minimax-h3-extender-v2.8.0"
 _LOG = logging.getLogger(__name__)
@@ -3996,6 +3997,13 @@ class MiniMaxH3Extender:
                     "tooltip": "Target total pixels for Auto resolution. Auto and Manual canvases use the MiniMax H3 32-pixel grid; Auto snaps downward without exceeding the requested pixel budget.",
                 },
             ),
+            "upscale_target": (
+                "FLOAT",
+                {
+                    "default": 0.0, "min": 0.0, "max": 64.0, "step": 0.01,
+                    "tooltip": "Upscale target megapixels for generating upscaled conditioning. Set > 0 to produce upscaled_guiders and upscaled_conditioning for the upscaling refinement pass.",
+                },
+            ),
             # Internal image-reference manager state. Appended after the v14.25
             # widgets so older positional workflow widget arrays keep mapping.
             "refs_json": (
@@ -4147,7 +4155,7 @@ class MiniMaxH3Extender:
             "hidden": {"unique_id": "UNIQUE_ID", "prompt": "PROMPT"},
         }
 
-    RETURN_TYPES = (CACHE_TYPE, "INT", "INT", "STRING", "FLOAT", "STRING")
+    RETURN_TYPES = (CACHE_TYPE, "INT", "INT", "STRING", "FLOAT", "STRING", "SAMPLER", "GUIDER", "MODEL", "CONDITIONING", "GUIDER", "CONDITIONING")
     RETURN_NAMES = (
         "cache",
         "clip_count",
@@ -4155,6 +4163,12 @@ class MiniMaxH3Extender:
         "status",
         "cache_size_mb",
         "build",
+        "sampler",
+        "guider",
+        "model",
+        "conditioning",
+        "upscaled_guider",
+        "upscaled_conditioning",
     )
     FUNCTION = "extend"
     CATEGORY = "MiniMax H3"
@@ -5280,6 +5294,13 @@ class MiniMaxH3Extender:
                 float(denoise),
             )
 
+            # Capture sampler, guider, model, and conditioning for the last
+            # processed clip so external upscaling samplers can reuse them.
+            extender_sampler = comfy.samplers.sampler_object(str(sampler_name))
+            extender_guider = _BasicGuider(model)
+            extender_guider.set_conds(positive)
+            extender_conditioning = positive
+
             result = disk_join.join(
                 samples=sampled,
                 trim_frames=trim_frames,
@@ -5509,6 +5530,27 @@ class MiniMaxH3Extender:
             "per_clip_lora_count": int(sum(len(cfg.get("loras") or []) for cfg in clips)),
             "build": BUILD,
         }
+        # Upscale conditioning: optionally build conditioning at upscaled resolution
+        upscaled_guider = None
+        upscaled_conditioning = None
+        upscaled_target = kwargs.get("upscale_target", 0.0)
+        if upscaled_target and upscaled_target > 0.0:
+            upscaled_guider, upscaled_conditioning = _make_upscaled_conditioning(
+                clip=clip,
+                vae=vae,
+                model=model,
+                original_width=resolved_width,
+                original_height=resolved_height,
+                target_megapixels=float(upscaled_target),
+                clip_prompt=clips[-1]["prompt"],
+                frame_count=float(clips[-1]["duration"]),
+                ref_items=ref_items,
+                ref_blocks=ref_blocks,
+                active_picture_slots=active_picture_slots,
+                active_video_slots=active_video_slots,
+                selected_audio_slots=selected_audio_slots,
+                audio_native_offset=audio_native_offset,
+            )
 
         return {
             "ui": {"h3_extender_state": [ui_state]},
@@ -5519,6 +5561,12 @@ class MiniMaxH3Extender:
                 status,
                 float(cache_mb),
                 BUILD,
+                extender_sampler,
+                extender_guider,
+                model,
+                extender_conditioning,
+                upscaled_guider,
+                upscaled_conditioning,
             ),
         }
 
