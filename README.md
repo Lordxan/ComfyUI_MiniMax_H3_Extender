@@ -6,6 +6,37 @@ The node combines **Ref2VA conditioning, Motion Context, disk caching, multi-cli
 
 ---
 
+---
+
+## 🎬 New — Latent Upscaling Pipeline
+
+The Extender now supports an **upsampling pipeline** that allows full-sequence latent upscaling after generation, preserving temporal continuity across all clips.
+
+Three new bridge nodes have been added:
+
+### H3 Upscale Concat
+
+Reads all raw low-resolution segments from the Extender disk cache and concatenates them into a single combined latent. All clips are concatenated first, then upscaled together.
+
+### H3 Upscale Latent Writer
+
+Takes the upscaled video latent and original audio latent, and combines them into a new disk cache file that `MiniMaxH3MotionContextDiskFinalDecode` can consume.
+
+### Upscaled Conditioning
+
+The Extender now optionally generates conditioning at the target upscaled resolution, enabling a proper upscaler refinement pass. Set `upscale_target` to control the target resolution in megapixels.
+
+### Workflow
+
+~~~text
+[Extender] → cache → [H3UpscaleConcat] → concatenated_latent →
+              [MinimaxH3LatentUpscaler3D] → upscaled → [Sampler] → [Writer] → Preview
+~~~
+
+This requires the external **ComfyUI_Minimax_h3_latent_Upscaler** package for the actual upscaling pass.
+
+---
+
 ## 🆕 v2.8.0 — Optional individual Full Batch clip export
 
 Full Batch can now optionally save each final clip as a separate video file using the new **Save Individual Clips** option in **Final Decode / Preview**.
