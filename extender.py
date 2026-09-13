@@ -100,7 +100,7 @@ from .ref2va_independent import (
     run as _run_ref2va_independent,
 )
 
-BUILD = "minimax-h3-extender-v2.7.4"
+BUILD = "minimax-h3-extender-v2.7.5"
 _LOG = logging.getLogger(__name__)
 FPS = 24
 AUDIO_LATENT_FPS = 40
@@ -150,6 +150,65 @@ MAX_LOCAL_MEDIA_UPLOAD_BYTES = 512 * 1024 * 1024
 LOCAL_REFS_VERSION = 1
 MAX_REF_PIXELS = 120_000_000
 _PROJECT_DOWNLOADS = {}
+
+
+def _purge_extender_cache_for_new_project():
+    """Atomically detach the active Extender cache, then delete its old contents.
+
+    New Project is deliberately broader than a per-owner cache reset: the Extender
+    maintains a shared hash-addressed reference/media store under the same cache
+    root, and those assets are project material too.  Moving the whole cache
+    directory out of the active path first guarantees that the next project sees
+    a completely clean namespace even if Windows delays deletion of an old file.
+    """
+    root = _ensure_cache_root()
+    parent = root.parent
+    tombstone = parent / f".{root.name}.new_project_{uuid.uuid4().hex}"
+    moved = False
+
+    try:
+        if root.exists():
+            os.replace(root, tombstone)
+            moved = True
+        root.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        # If creating the fresh cache failed after the rename, restore the old
+        # directory so the current project is not left half-reset.
+        if moved and tombstone.exists() and not root.exists():
+            try:
+                os.replace(tombstone, root)
+            except Exception:
+                pass
+        raise
+
+    # Prepared project downloads live inside the cache tree that was just
+    # detached; their in-memory tokens must not keep pointing at deleted files.
+    _PROJECT_DOWNLOADS.clear()
+
+    cleanup_pending = False
+    stale_roots = []
+    if moved:
+        stale_roots.append(tombstone)
+    # Retry any previous detached cache that Windows could not remove immediately.
+    try:
+        stale_roots.extend(
+            path for path in parent.glob(f".{root.name}.new_project_*")
+            if path not in stale_roots
+        )
+    except Exception:
+        pass
+
+    for stale in stale_roots:
+        try:
+            if stale.is_symlink() or stale.is_file():
+                stale.unlink(missing_ok=True)
+            else:
+                shutil.rmtree(stale)
+        except Exception as exc:
+            cleanup_pending = True
+            _LOG.warning("MiniMax H3 Extender: detached old cache cleanup pending: %s", exc)
+
+    return {"cleanup_pending": bool(cleanup_pending)}
 
 
 def _align_frame_count(n: int) -> int:
@@ -5319,6 +5378,28 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 
 
 if getattr(PromptServer, "instance", None) is not None:
+    @PromptServer.instance.routes.post("/h3_extender/project/new")
+    async def h3_extender_project_new(request):
+        """Start a clean Extender project while leaving node settings untouched."""
+        try:
+            body = await request.json()
+            owner_id = str(body.get("owner_id", "")).strip()
+            if not owner_id:
+                return web.json_response(
+                    {"ok": False, "error": "Missing Extender node id."}, status=400
+                )
+
+            result = await asyncio.to_thread(_purge_extender_cache_for_new_project)
+            clear_full_batch_interrupt(owner_id, "ref2va")
+            clear_full_batch_interrupt(owner_id, "fl2va")
+            return web.json_response({
+                "ok": True,
+                "cleanup_pending": bool(result.get("cleanup_pending", False)),
+            })
+        except Exception as exc:
+            _LOG.exception("MiniMax H3 Extender: New Project cache reset failed")
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
     @PromptServer.instance.routes.get("/h3_extender/loras")
     async def h3_extender_loras(request):
         """Return the current ComfyUI LoRA filename list for card dropdowns."""
