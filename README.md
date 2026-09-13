@@ -8,7 +8,7 @@ The node combines **Ref2VA conditioning, Motion Context, disk caching, multi-cli
 
 ### 🆕 v2.7.5 — New Project button
 
-Added a new **New Project** button to quickly start from a completely clean state without recreating the Extender node.
+Added a new **New Project** button to quickly start from a completely clean state.
 
 It clears all current project data and cached references, removes prompts, resets the timeline to a single empty clip, and wipes previous computed/validated state — while keeping all global node settings unchanged.
 
