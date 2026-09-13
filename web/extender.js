@@ -1076,6 +1076,7 @@ function validatedPrefixFromState(state) {
 async function restoreCacheState(node, runtime) {
     if (!node || !runtime || runtime.hydrating || runtime.cacheStateRequestRunning) return;
 
+    const requestEpoch = Number(runtime.cacheStateEpoch || 0);
     runtime.cacheStateRequestRunning = true;
     try {
         const params = new URLSearchParams();
@@ -1089,6 +1090,10 @@ async function restoreCacheState(node, runtime) {
 
         const payload = await response.json();
         if (!payload?.found) return;
+        // New Project can invalidate a startup cache-state request while its
+        // fetch is in flight. Never let that stale response repopulate the
+        // freshly cleared project UI.
+        if (requestEpoch !== Number(runtime.cacheStateEpoch || 0)) return;
 
         // Do not overwrite live execution information if generation started
         // while the startup request was in flight.
@@ -3496,6 +3501,82 @@ function applyProjectPayload(node, runtime, projectPayload) {
     node.graph?.setDirtyCanvas(true, true);
 }
 
+function freshProjectState(runtime) {
+    const generationMode = String(runtime?.state?.generation_mode || "ref2va") === "fl2va" ? "fl2va" : "ref2va";
+    const motionContext = runtime?.state?.motion_context !== false;
+    const ref2vaClips = blankModeClips();
+    const fl2vaClips = blankModeClips();
+    const activeClips = generationMode === "fl2va" ? fl2vaClips : ref2vaClips;
+    return {
+        version: 2,
+        generation_mode: generationMode,
+        motion_context: motionContext,
+        causal_lineage: activeClips.map((clip) => String(clip.id)),
+        // Force a fresh ComfyUI input hash even when every global widget keeps
+        // exactly the same value as the previous project.
+        load_token: `${Date.now().toString(36)}_${randomSeed().toString(36)}`,
+        prompt_pack_signature: "",
+        resume_nonce: "",
+        clips: activeClips,
+        mode_clips: { ref2va: ref2vaClips, fl2va: fl2vaClips },
+    };
+}
+
+function resetRuntimeForNewProject(node, runtime) {
+    if (!node || !runtime) return;
+
+    runtime.state = freshProjectState(runtime);
+    runtime.refsState = emptyRefsState();
+
+    runtime.cachedCount = 0;
+    runtime.validatedCount = 0;
+    runtime.cachedClipIds = new Set();
+    runtime.validatedClipIds = new Set();
+    runtime.computedIndices = new Set();
+    runtime.computedClipIds = new Set();
+    runtime.checkpointActive = false;
+    runtime.checkpointInterrupted = false;
+    runtime.checkpointSnapshotCount = 0;
+    runtime.cacheStateEpoch = Number(runtime.cacheStateEpoch || 0) + 1;
+    runtime.cacheStateRestored = true;
+    runtime.cacheStateRequestRunning = false;
+    runtime.interruptRequested = false;
+    runtime.interruptRequestBusy = false;
+    runtime.continuitySignatures = new Map();
+    runtime.continuitySignatureRequests = new Set();
+    runtime.modeValidationState = {};
+    runtime.modeValidationOrder = {};
+
+    runtime.pendingRefSlot = -1;
+    runtime.pendingFrameClip = -1;
+    runtime.pendingFrameKind = "";
+    runtime.pendingFrameGuideIndex = -1;
+
+    // Cached/derived resolution belongs to the old project.  Keep the user's
+    // global resolution mode, megapixel value and Manual fallback untouched.
+    runtime.expectedResolution = null;
+    runtime.resolvedWidth = 0;
+    runtime.resolvedHeight = 0;
+    runtime.resolutionGuide = "";
+    runtime.guideSourceWidth = 0;
+    runtime.guideSourceHeight = 0;
+    runtime.resolutionFallback = false;
+    runtime.resolutionMismatch = false;
+    runtime.resolutionMirrorActive = false;
+    runtime.projectResolutionLoaded = false;
+    runtime.resolutionInvalidated = false;
+
+    runtime.projectName = "";
+    if (node.properties) delete node.properties.h3_project_name;
+
+    updateRefsHidden(node, runtime);
+    updateHidden(node, runtime);
+    // Do not touch any native/global widget value here. In Auto mode width and
+    // height may still display the last derived mirror until a new reference is
+    // loaded; that is preferable to New Project silently changing a setting.
+    captureNativeWorkflowState(node, runtime);
+}
+
 function projectBusy(runtime) {
     return ["preparing", "sampling", "complete"].includes(String(runtime?.activePhase || ""));
 }
@@ -3503,8 +3584,57 @@ function projectBusy(runtime) {
 function setProjectButtonsBusy(runtime, busy) {
     if (!runtime) return;
     runtime.projectOperationBusy = Boolean(busy);
+    if (runtime.newProjectButton) runtime.newProjectButton.disabled = Boolean(busy);
     if (runtime.saveProjectButton) runtime.saveProjectButton.disabled = Boolean(busy);
     if (runtime.loadProjectButton) runtime.loadProjectButton.disabled = Boolean(busy);
+}
+
+async function newProject(node, runtime) {
+    if (!node || !runtime) return;
+    if (projectBusy(runtime) || runtime.refBusy || runtime.projectOperationBusy) {
+        alert("Wait for the current Extender operation to finish before starting a new project.");
+        return;
+    }
+    if (!confirm(
+        "Start a new project?\n\n" +
+        "This permanently clears the Extender cache and all cached references, removes all prompts, " +
+        "and resets the timeline to one empty clip.\n\n" +
+        "Global node settings will be kept unchanged."
+    )) return;
+
+    setProjectButtonsBusy(runtime, true);
+    runtime.statusText = "Starting new project…";
+    render(node, runtime);
+    try {
+        const response = await fetch(api.apiURL("/h3_extender/project/new"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ owner_id: String(node.id) }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload?.ok) {
+            throw new Error(payload?.error || `New Project failed (${response.status}).`);
+        }
+
+        resetRuntimeForNewProject(node, runtime);
+        runtime.statusText = payload?.cleanup_pending
+            ? "New project ready | active cache cleared (old locked files pending OS cleanup)"
+            : "New project ready | cache cleared";
+        render(node, runtime);
+        syncDomHeight(node, runtime, false);
+        node.graph?.setDirtyCanvas(true, true);
+
+        window.dispatchEvent(new CustomEvent("h3-extender-new-project", {
+            detail: { owner_id: String(node.id) },
+        }));
+    } catch (error) {
+        runtime.statusText = "New Project failed";
+        render(node, runtime);
+        alert(String(error?.message || error));
+    } finally {
+        setProjectButtonsBusy(runtime, false);
+        render(node, runtime);
+    }
 }
 
 async function saveProject(node, runtime) {
@@ -5523,6 +5653,14 @@ function buildUi(node) {
         render(node, runtime);
     });
 
+    const newProjectButton = document.createElement("button");
+    newProjectButton.textContent = "New Project";
+    newProjectButton.title = "Clear all current Extender project data/cache and start with one empty clip; global settings are preserved";
+    newProjectButton.addEventListener("click", (e) => {
+        e.preventDefault();
+        newProject(node, runtime);
+    });
+
     const saveProjectButton = document.createElement("button");
     saveProjectButton.textContent = "Save Project";
     saveProjectButton.title = "Save settings + disk cache as a portable .ext project";
@@ -5576,7 +5714,7 @@ function buildUi(node) {
     status.style.textOverflow = "ellipsis";
     status.style.maxWidth = "55%";
 
-    toolbar.append(modeButton, motionButton, add, remove, saveProjectButton, loadProjectButton, interruptButton, counter, status, projectFileInput);
+    toolbar.append(modeButton, motionButton, add, remove, newProjectButton, saveProjectButton, loadProjectButton, interruptButton, counter, status, projectFileInput);
 
     const refFileInput = document.createElement("input");
     refFileInput.type = "file";
@@ -5649,6 +5787,7 @@ function buildUi(node) {
         cards,
         counter,
         status,
+        newProjectButton,
         saveProjectButton,
         loadProjectButton,
         interruptButton,
@@ -5690,6 +5829,7 @@ function buildUi(node) {
         activeClipIndex: -1,
         activePhase: "idle",
         cacheStateRequestRunning: false,
+        cacheStateEpoch: 0,
         cacheStateRestored: false,
         expectedResolution: null,
         resolvedWidth: 0,
