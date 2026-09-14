@@ -4361,7 +4361,11 @@ function restorePromptUiState(prompt, runtime, clipId) {
     const saved = runtime?.promptUiState?.get?.(String(clipId || ""));
     if (!saved || !prompt) return;
 
-    if (saved.focused) {
+    // Restoring DOM focus during a Legacy LiteGraph layout pass can interfere
+    // with ComfyUI's DOM-widget width calculation (notably when the sidebar
+    // opens/closes). Preserve focus only in Nodes 2.0; Legacy still restores
+    // the caret/selection and textarea-local scroll without forcing focus.
+    if (saved.focused && domWidgetRenderMode(runtime?.root) === "nodes2") {
         try {
             prompt.focus({ preventScroll: true });
         } catch (_) {
