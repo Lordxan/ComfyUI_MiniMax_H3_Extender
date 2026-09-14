@@ -123,6 +123,13 @@ function randomAccessMode(state) {
     return String(state?.generation_mode || "ref2va") === "fl2va" || ref2vaIndependentMode(state);
 }
 
+function clipHasPhysicalCache(runtime, clip, index) {
+    if (randomAccessMode(runtime?.state)) {
+        return runtime?.cachedClipIds?.has(String(clip?.id || "")) || false;
+    }
+    return Number(index) >= 0 && Number(index) < Number(runtime?.cachedCount || 0);
+}
+
 function validationStateKey(modeOrState = "ref2va", motionContext = null) {
     const stateLike = modeOrState && typeof modeOrState === "object" ? modeOrState : null;
     const mode = String(stateLike?.generation_mode ?? modeOrState ?? "ref2va") === "fl2va" ? "fl2va" : "ref2va";
@@ -459,6 +466,13 @@ async function prepareLocalRefMutation(node, runtime, clipIndex) {
     } else {
         invalidateFrom(runtime.state, index);
     }
+
+    // A future Ref2VA Motion-Context card may legitimately have local refs
+    // before it has ever been generated. In that case there is no disk segment
+    // to invalidate, so do not send an out-of-range clip_index to the manifest
+    // route. The new local ref will simply be part of that clip's first render.
+    if (!clipHasPhysicalCache(runtime, clip, index)) return true;
+
     if (!(await persistLocalRefInvalidation(node, runtime, index))) return false;
     return true;
 }
@@ -5041,7 +5055,18 @@ function render(node, runtime) {
                 }
             } else {
                 if (validated.checked) {
-                    clip.validated = true;
+                    // Ref2VA Motion ON is sequential, but the UI may already
+                    // contain cards that have never been rendered. Match the
+                    // random-access modes here: a card without a physical cache
+                    // cannot be committed as Validated. This also prevents an
+                    // unnecessary out-of-range manifest request.
+                    if (!clipHasPhysicalCache(runtime, clip, index)) {
+                        clip.validated = false;
+                        validated.checked = false;
+                        runtime.statusText = `Clip ${index + 1} cannot be marked Validated because its cache does not exist yet.`;
+                    } else {
+                        clip.validated = true;
+                    }
                 } else {
                     invalidateFrom(state, index);
                 }
