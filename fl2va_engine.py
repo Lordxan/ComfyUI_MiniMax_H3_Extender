@@ -1392,7 +1392,7 @@ def cached_fl2va_ids(manifest) -> set[str]:
     }
 
 
-def store_fl2va_segment(owner_id, fps, clip_ids, clip_index, clip_id, samples, validated=False, run_mode="full_batch", dependency_meta=None, computed=False):
+def store_fl2va_segment(owner_id, fps, clip_ids, clip_index, clip_id, samples, validated=False, run_mode="full_batch", dependency_meta=None, computed=False, generation_seed=None):
     """Append a new latent blob and atomically replace/insert one logical plan."""
     from .motion_context_disk import (
         _append_segment,
@@ -1421,6 +1421,8 @@ def store_fl2va_segment(owner_id, fps, clip_ids, clip_index, clip_id, samples, v
         validated=bool(validated),
         manifest=manifest,
     )
+    if generation_seed is not None:
+        desc["generation_seed"] = int(generation_seed)
     desc["clip_id"] = clip_id
     desc["index"] = clip_index
     desc["trim_frames"] = 0
@@ -1557,6 +1559,7 @@ def export_fl2va_final(
     workflow=None,
     prompt=None,
     require_continuity=True,
+    project_autosave_settings=None,
 ):
     """Decode FL2VA plans as independent hard cuts.
 
@@ -1890,6 +1893,9 @@ def export_fl2va_final(
     )
 
     d._embed_final_metadata_in_place(output_path, workflow=workflow, prompt=prompt)
+    project_autosave_info = d._maybe_auto_save_project(
+        cache, output_path, unique_id, project_autosave_settings, len(segments), expected_frames
+    )
     progress.advance()
     d._LOG.info(
         "FL2VA incremental Full Decode: clips=%d frames=%d interrupted=%s video=%s output=%s",
@@ -1901,6 +1907,7 @@ def export_fl2va_final(
         "ui": {
             "h3_video": [item],
             "h3_preview_info": [{
+                **project_autosave_info,
                 "mode": "fl2va_full_batch_incremental",
                 "clip": len(segments),
                 "preview_frames": expected_frames,

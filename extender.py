@@ -17,6 +17,8 @@ import asyncio
 import copy
 import datetime as _datetime
 import hashlib
+import functools
+import inspect
 import json
 import logging
 import mimetypes
@@ -100,7 +102,7 @@ from .ref2va_independent import (
     run as _run_ref2va_independent,
 )
 
-BUILD = "minimax-h3-extender-v2.7.5"
+BUILD = "minimax-h3-extender-v2.7.7"
 _LOG = logging.getLogger(__name__)
 FPS = 24
 AUDIO_LATENT_FPS = 40
@@ -2807,6 +2809,47 @@ def _zip_write_prefix(zf, arcname, source_path, byte_limit):
             remaining -= len(chunk)
 
 
+def _restore_project_generation_seeds(project_payload, manifest):
+    """Update only the portable project's active cards, never live/queued inputs.
+
+    Missing seed metadata in legacy caches is deliberately not guessed. Stable
+    clip ids prevent reordered or deleted cards from inheriting another seed.
+    """
+    seeds = {}
+    for desc in (manifest or {}).get("segments", []):
+        seed = desc.get("generation_seed")
+        clip_id = desc.get("clip_id")
+        if clip_id and type(seed) is int and 0 <= seed <= DEFAULT_SEED_MAX:
+            seeds[str(clip_id)] = seed
+    if not seeds:
+        return
+    mode = _generation_mode_from_project_payload(project_payload)
+    extender = project_payload.get("extender", {})
+
+    def update_cards(cards):
+        if isinstance(cards, list):
+            for card in cards:
+                if isinstance(card, dict) and str(card.get("id") or "") in seeds:
+                    card["seed"] = seeds[str(card["id"])]
+
+    update_cards(extender.get("clips"))
+    for container in (extender, extender.get("settings", {})):
+        raw = container.get("clips_json")
+        if not isinstance(raw, str):
+            continue
+        try:
+            state = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(state, dict):
+            continue
+        update_cards(state.get("clips"))
+        timelines = state.get("mode_clips")
+        if isinstance(timelines, dict):
+            update_cards(timelines.get(mode))
+        container["clips_json"] = json.dumps(state, ensure_ascii=False)
+
+
 def _build_project_archive(owner_id, requested_name, project_payload, output_path):
     project_payload = copy.deepcopy(project_payload)
     generation_mode = _generation_mode_from_project_payload(project_payload)
@@ -2930,6 +2973,8 @@ def _build_project_archive(owner_id, requested_name, project_payload, output_pat
             print(f"[WARNING] MiniMax H3 Extender: independent Ref2VA Save Project compaction skipped: {exc}")
 
     snapshot = _project_cache_snapshot(owner_id, project_payload)
+    if snapshot is not None:
+        _restore_project_generation_seeds(project_payload, snapshot["manifest"])
     continuity_files = (
         fl2va_project_continuity_files(
             snapshot["data_path"], snapshot["manifest"].get("segments", [])
@@ -3657,6 +3702,8 @@ def _import_project_archive(owner_id, archive_path):
                 settings["motion_context"] = bool(motion_context)
                 settings["clips_json"] = normalized_clips_json
 
+            _restore_project_generation_seeds(project_payload, imported_manifest)
+
             _replace_cache_transaction(
                 owner_id,
                 new_data if imported_manifest is not None else None,
@@ -3779,6 +3826,110 @@ def _import_project_archive(owner_id, archive_path):
     finally:
         shutil.rmtree(work_root, ignore_errors=True)
 
+
+
+PROJECT_SETTING_NAMES = (
+    "run_mode", "width", "height", "ref_image_size", "steps", "sampler_name",
+    "scheduler", "denoise", "context_length", "audio_context_length", "clips_json",
+    "resolution_mode", "megapixels", "refs_json", "generation_mode", "motion_context",
+)
+
+
+def _capture_full_batch_project(function):
+    """Carry small, executed project metadata with the cache, never model tensors.
+
+    Capture after execution so imported prompt/ref packs are reflected. This
+    metadata also survives ComfyUI reusing a cached Extender output.
+    """
+    signature = inspect.signature(function)
+
+    @functools.wraps(function)
+    def wrapped(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        inputs = bound.arguments
+        result = function(*args, **kwargs)
+        if str(inputs.get("run_mode")) != "full_batch":
+            return result
+        cache = result["result"][0]
+        if not isinstance(cache, dict):
+            return result
+        state = result["ui"]["h3_extender_state"][0]
+        settings = {name: copy.deepcopy(inputs[name]) for name in PROJECT_SETTING_NAMES if name in inputs}
+        settings["clips_json"] = state["clips_json"]
+        if state.get("refs_json") is not None:
+            settings["refs_json"] = state["refs_json"]
+        # The Auto width/height widgets mirror the generated canvas. The UI
+        # serializes its separate Manual fallback with this exact queued job.
+        try:
+            submitted = json.loads(inputs.get("clips_json") or "{}")
+            manual = submitted.get("project_manual_resolution", {})
+            for dimension in ("width", "height"):
+                value = manual.get(dimension)
+                if type(value) in (int, float) and math.isfinite(value) and value == int(value) and 32 <= value <= 4096 and int(value) % 32 == 0:
+                    settings[dimension] = int(value)
+        except (ValueError, TypeError, AttributeError):
+            pass  # Legacy/API jobs retain their supplied width/height fallback.
+        mode = str(state.get("generation_mode") or settings["generation_mode"])
+        owner = str(inputs.get("unique_id") if inputs.get("unique_id") is not None else "h3_extender")
+        project = {
+            "schema_version": 2,
+            "extender": {
+                "class_name": "MiniMaxH3Extender",
+                "generation_mode": mode,
+                "motion_context": bool(settings.get("motion_context", True)),
+                "settings": settings,
+                "clips_json": state["clips_json"],
+                "refs_json": settings.get("refs_json"),
+                "resolution": {
+                    "mode": settings["resolution_mode"],
+                    "megapixels": settings["megapixels"],
+                    "manual_width": settings["width"],
+                    "manual_height": settings["height"],
+                    "resolved_width": state["resolved_width"],
+                    "resolved_height": state["resolved_height"],
+                    "guide_ref": state.get("resolution_guide", ""),
+                    "fallback": bool(state.get("resolution_fallback", False)),
+                },
+            },
+        }
+        # Copy the handle rather than attaching metadata to shared cached output.
+        cache = dict(cache)
+        cache["project_snapshot"] = {"owner_id": owner, "project": project}
+        result = dict(result)
+        result["result"] = (cache, *result["result"][1:])
+        return result
+
+    return wrapped
+
+
+def _auto_save_full_batch_project(cache, output_path, final_id, settings, clip_count, frame_count):
+    """Write the portable archive synchronously before the next job can run."""
+    snapshot = cache.get("project_snapshot")
+    if not isinstance(snapshot, dict):
+        raise ValueError("Project information is unavailable. Run the Extender with this version before using Auto Save Project.")
+    payload = copy.deepcopy(snapshot["project"])
+    expected_clips = len(_clips_from_project_payload(payload))
+    if int(clip_count) != expected_clips:
+        raise ValueError(f"Batch is incomplete ({clip_count}/{expected_clips} clips); project was not auto-saved.")
+    payload["final_decode"] = {
+        "class_name": "MiniMaxH3MotionContextDiskFinalDecode",
+        "node_id": str(final_id or ""),
+        "settings": copy.deepcopy(settings),
+        "preview": {"available": True, "clip_count": int(clip_count), "frame_count": int(frame_count)},
+    }
+    destination = Path(output_path).with_suffix(".ext")
+    if destination.exists():
+        raise FileExistsError(f"Project already exists: {destination.name}")
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        metadata = _build_project_archive(snapshot["owner_id"], destination.name, payload, temporary)
+        if not metadata["cache"]["present"] or metadata["cache"]["clip_count"] != expected_clips:
+            raise IOError("Project cache does not match the completed batch.")
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return str(destination)
 
 
 class MiniMaxH3Extender:
@@ -4367,6 +4518,7 @@ class MiniMaxH3Extender:
                 run_mode=str(run_mode),
                 dependency_meta=dependency_meta,
                 computed=(str(run_mode) == "full_batch"),
+                generation_seed=cfg["seed"],
             )
             statuses.append(cache_status)
             cached_ids.add(clip_id)
@@ -4561,6 +4713,7 @@ class MiniMaxH3Extender:
             ),
         }
 
+    @_capture_full_batch_project
     def extend(
         self,
         model,
@@ -5135,7 +5288,9 @@ class MiniMaxH3Extender:
                 fps=float(FPS),
                 previous_cache=previous_handle,
                 unique_id=f"extender_{owner}",
+                generation_clip_id=cfg["id"],
                 computed=(str(run_mode) == "full_batch"),
+                generation_seed=cfg["seed"],
             )
             previous_handle = result[0]
             previous_proxy = result[1]

@@ -61,7 +61,7 @@ from .motion_context_ram import (
     _streams_from_latent,
 )
 
-BUILD = "motion-context-disk-v2.7.5"
+BUILD = "motion-context-disk-v2.7.7"
 PREVIEW_AUDIO_MODE = "pcm_single_aac_gain_chain_v3_entry_ramp"
 CACHE_VERSION = 12
 PREVIEW_ROTATION_SLOTS = 3
@@ -1096,6 +1096,8 @@ class MiniMaxH3MotionContextDiskJoin:
         unique_id=None,
         reuse_existing=False,
         computed=False,
+        generation_seed=None,
+        generation_clip_id=None,
     ):
         data_path, manifest_path, manifest, mode, stop, index = _effective_state(
             previous_cache, run_mode, fps, unique_id
@@ -1175,6 +1177,10 @@ class MiniMaxH3MotionContextDiskJoin:
                 validated=bool(validated),
                 manifest=manifest,
             )
+            if generation_seed is not None:
+                desc["generation_seed"] = int(generation_seed)
+            if generation_clip_id is not None:
+                desc["clip_id"] = str(generation_clip_id)
             if bool(computed) and not bool(validated):
                 desc["computed"] = True
             segments = [dict(x) for x in manifest.get("segments", [])] + [desc]
@@ -4773,6 +4779,24 @@ if web is not None and PromptServer is not None and getattr(PromptServer, "insta
 
 
 
+def _maybe_auto_save_project(cache, output_path, final_id, settings, clip_count, frame_count):
+    if not settings or not settings.get("auto_save_project", False):
+        return {}
+    if not isinstance(cache, dict) or cache.get("run_mode") != "full_batch" or cache.get("interrupted", False):
+        return {}
+    try:
+        from .extender import _auto_save_full_batch_project
+        _LOG.info("H3: saving project for %s", output_path)
+        path = _auto_save_full_batch_project(cache, output_path, final_id, settings, clip_count, frame_count)
+        _LOG.info("H3: project saved: %s", path)
+        return {"project_autosave_path": path}
+    except Exception as exc:
+        # An archive failure must not discard the successfully exported video
+        # or abort an unattended queue. Surface it in both the log and preview.
+        _LOG.error("H3 Auto Save Project failed (video preserved): %s", exc)
+        return {"project_autosave_error": str(exc)}
+
+
 class MiniMaxH3MotionContextDiskFinalDecode:
     @classmethod
     def INPUT_TYPES(cls):
@@ -4795,6 +4819,7 @@ class MiniMaxH3MotionContextDiskFinalDecode:
                 "preset": (["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"], {"default": "fast"}),
                 "audio_bitrate": (["128k", "192k", "256k", "320k"], {"default": "192k"}),
                 "autoplay": ("BOOLEAN", {"default": True, "tooltip": "Auto-play the video preview when generating finishes or the node is loaded."}),
+                "auto_save_project": ("BOOLEAN", {"default": False, "tooltip": "Save a portable .ext project beside each completed Full Batch video. All three modes supported. Ignored in Clip-by-Clip and for interrupted batches. Large projects add disk space and saving time."}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -4825,6 +4850,7 @@ class MiniMaxH3MotionContextDiskFinalDecode:
         unique_id=None,
         prompt=None,
         extra_pnginfo=None,
+        auto_save_project=False,
     ):
         data_path, manifest_path, manifest = _load_manifest(cache)
         # FPS is cache metadata, never a user choice. The compatibility widget
@@ -4834,6 +4860,14 @@ class MiniMaxH3MotionContextDiskFinalDecode:
         if not math.isfinite(fps) or fps <= 0.0:
             raise ValueError(f"Disk Final Decode: invalid cached fps {fps!r}.")
         workflow = _workflow_from_extra_pnginfo(extra_pnginfo)
+        project_autosave_settings = None
+        if auto_save_project:
+            project_autosave_settings = {
+                "filename_prefix": filename_prefix, "output_directory": output_directory,
+                "codec": codec, "crf": crf, "preset": preset,
+                "audio_bitrate": audio_bitrate, "autoplay": autoplay,
+                "auto_save_project": True,
+            }
         segments = [dict(x) for x in manifest.get("segments", [])]
         if not segments:
             raise ValueError("Disk Final Decode: empty cache.")
@@ -4851,6 +4885,7 @@ class MiniMaxH3MotionContextDiskFinalDecode:
                 filename_prefix=filename_prefix, output_directory=output_directory,
                 codec=codec, crf=crf, preset=preset, audio_bitrate=audio_bitrate,
                 unique_id=unique_id, workflow=workflow, prompt=prompt,
+                project_autosave_settings=project_autosave_settings,
             )
         if sequence_mode == "fl2va":
             from .fl2va_engine import export_fl2va_final
@@ -4859,6 +4894,7 @@ class MiniMaxH3MotionContextDiskFinalDecode:
                 filename_prefix=filename_prefix, output_directory=output_directory,
                 codec=codec, crf=crf, preset=preset, audio_bitrate=audio_bitrate,
                 unique_id=unique_id, workflow=workflow, prompt=prompt,
+                project_autosave_settings=project_autosave_settings,
             )
         color_timeline = _color_timeline(segments, float(fps))
 
@@ -5025,6 +5061,9 @@ class MiniMaxH3MotionContextDiskFinalDecode:
         )
 
         _embed_final_metadata_in_place(output_path, workflow=workflow, prompt=prompt)
+        project_autosave_info = _maybe_auto_save_project(
+            cache, output_path, unique_id, project_autosave_settings, len(segments), expected_frames
+        )
         progress.advance()
 
         _LOG.info(
@@ -5037,6 +5076,7 @@ class MiniMaxH3MotionContextDiskFinalDecode:
             "ui": {
                 "h3_video": [item],
                 "h3_preview_info": [{
+                    **project_autosave_info,
                     "mode": "full_batch_incremental",
                     "clip": int(len(segments)),
                     "preview_frames": int(expected_frames),
