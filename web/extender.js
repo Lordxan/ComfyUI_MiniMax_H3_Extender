@@ -3009,7 +3009,24 @@ function removeReference(node, runtime, slotIndex) {
     }
     const oldName = runtime.refsState.refs[slotIndex]?.original_name || `Ref ${slotIndex + 1}`;
     runtime.refsState.refs[slotIndex] = null;
+
+    // Nodes 2.0 can postpone the custom DOM-widget repaint triggered through
+    // graph.change()/setDirtyCanvas until the next node interaction. Redraw the
+    // reference strip from the already-updated runtime state immediately so the
+    // slot becomes visibly free on the first click. A second redraw on the next
+    // animation frame wins over any deferred Vue/LiteGraph paint from this same
+    // pointer event without changing reference/invalidation semantics.
+    renderReferences(node, runtime);
+    node.graph?.setDirtyCanvas?.(true, true);
+
     handleReferenceChange(node, runtime, `${oldName} removed`);
+
+    requestAnimationFrame(() => {
+        if (!runtime?.refsRow) return;
+        if (runtime.state?.generation_mode === "fl2va") return;
+        renderReferences(node, runtime);
+        node.graph?.setDirtyCanvas?.(true, true);
+    });
 }
 
 function nodeIs(node, className) {
