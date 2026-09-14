@@ -103,6 +103,7 @@ const FINAL_PROJECT_WIDGETS = [
     "crf",
     "preset",
     "audio_bitrate",
+    "auto_save_project",
 ];
 
 function boolValue(value, defaultValue = true) {
@@ -3490,6 +3491,10 @@ function applyProjectPayload(node, runtime, projectPayload) {
     const finalSettings = projectPayload?.final_decode?.settings;
     const finalNode = connectedFinalDecode(node);
     if (finalNode && finalSettings && typeof finalSettings === "object") {
+        // Older projects predate autosave: loading them keeps it opt-in.
+        if (!Object.prototype.hasOwnProperty.call(finalSettings, "auto_save_project")) {
+            setWidgetValue(finalNode, "auto_save_project", false);
+        }
         for (const name of FINAL_PROJECT_WIDGETS) {
             if (Object.prototype.hasOwnProperty.call(finalSettings, name)) {
                 setWidgetValue(finalNode, name, finalSettings[name]);
@@ -5881,6 +5886,29 @@ function buildUi(node) {
         // completed; custom controls never serialize a parallel state.
         hydrating: isH3GraphConfiguring(),
         ready: false,
+    };
+
+    // Capture UI-only fallback dimensions with the submitted job, before its
+    // seeds advance. Do not overwrite the widget or change rendering inputs.
+    const oldSerializeValue = jsonWidget.serializeValue;
+    jsonWidget.serializeValue = function (...args) {
+        const active = node.__h3Extender || runtime;
+        const manualResolution = {
+            width: Number(active.manualWidth || getWidget(node, "width")?.value || 896),
+            height: Number(active.manualHeight || getWidget(node, "height")?.value || 576),
+        };
+        const attach = (raw) => {
+            try {
+                const payload = JSON.parse(raw);
+                if (!payload || Array.isArray(payload) || typeof payload !== "object") return raw;
+                payload.project_manual_resolution = manualResolution;
+                return JSON.stringify(payload);
+            } catch (_) {
+                return raw;
+            }
+        };
+        const raw = oldSerializeValue ? oldSerializeValue.apply(this, args) : this.value;
+        return raw && typeof raw.then === "function" ? raw.then(attach) : attach(raw);
     };
 
     const oldAfterQueued = jsonWidget.afterQueued;

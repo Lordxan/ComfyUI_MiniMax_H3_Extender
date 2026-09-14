@@ -1096,6 +1096,16 @@ app.registerExtension({
                 state.label.textContent = "FULL LIVE PREVIEW";
             }
 
+            if (meta?.project_autosave_error) {
+                state.label.textContent += " — PROJECT SAVE FAILED";
+                state.label.title = String(meta.project_autosave_error);
+            } else if (meta?.project_autosave_path) {
+                state.label.textContent += " — PROJECT SAVED";
+                state.label.title = String(meta.project_autosave_path);
+            } else {
+                state.label.title = "";
+            }
+
             state.currentVideoInfo = { ...info };
             state.currentPreviewMeta = {
                 clip_count: Number(meta?.preview_clips || meta?.total_clips || 0),
