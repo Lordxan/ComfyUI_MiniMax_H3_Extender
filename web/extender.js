@@ -4322,8 +4322,74 @@ function renderMediaStrip(node, runtime, fl2vaMode) {
     }
 }
 
+function capturePromptUiState(runtime) {
+    const cards = runtime?.cards;
+    if (!cards?.querySelectorAll) return;
+
+    const prompts = Array.from(cards.querySelectorAll("textarea[data-h3-prompt-clip-id]"));
+    if (!prompts.length) return;
+
+    if (!runtime.promptUiState?.set || !runtime.promptUiState?.get) runtime.promptUiState = new Map();
+    const active = document.activeElement;
+
+    for (const prompt of prompts) {
+        const clipId = String(prompt?.dataset?.h3PromptClipId || "");
+        if (!clipId) continue;
+
+        let selectionStart = null;
+        let selectionEnd = null;
+        let selectionDirection = "none";
+        try {
+            selectionStart = Number.isInteger(prompt.selectionStart) ? prompt.selectionStart : null;
+            selectionEnd = Number.isInteger(prompt.selectionEnd) ? prompt.selectionEnd : null;
+            selectionDirection = String(prompt.selectionDirection || "none");
+        } catch (_) {}
+
+        runtime.promptUiState.set(clipId, {
+            scrollTop: Number(prompt.scrollTop) || 0,
+            scrollLeft: Number(prompt.scrollLeft) || 0,
+            selectionStart,
+            selectionEnd,
+            selectionDirection,
+            focused: active === prompt,
+        });
+    }
+
+}
+
+function restorePromptUiState(prompt, runtime, clipId) {
+    const saved = runtime?.promptUiState?.get?.(String(clipId || ""));
+    if (!saved || !prompt) return;
+
+    if (saved.focused) {
+        try {
+            prompt.focus({ preventScroll: true });
+        } catch (_) {
+            try { prompt.focus(); } catch (_) {}
+        }
+    }
+
+    if (Number.isInteger(saved.selectionStart) && Number.isInteger(saved.selectionEnd)) {
+        try {
+            prompt.setSelectionRange(
+                saved.selectionStart,
+                saved.selectionEnd,
+                saved.selectionDirection || "none",
+            );
+        } catch (_) {}
+    }
+
+    // focus()/setSelectionRange() may scroll a textarea to the caret in some
+    // browsers, so restore the user's viewport last.
+    prompt.scrollTop = Math.max(0, Number(saved.scrollTop) || 0);
+    prompt.scrollLeft = Math.max(0, Number(saved.scrollLeft) || 0);
+}
+
 function render(node, runtime) {
     const { state, cards, counter, status } = runtime;
+    // render() rebuilds every card. Capture textarea-local UI state first so
+    // long prompts do not jump back to the top after progress/status updates.
+    capturePromptUiState(runtime);
     cards.replaceChildren();
 
     const fl2vaMode = state.generation_mode === "fl2va";
@@ -4780,6 +4846,7 @@ function render(node, runtime) {
         const prompt = document.createElement("textarea");
         prompt.value = clip.prompt;
         prompt.spellcheck = false;
+        prompt.dataset.h3PromptClipId = String(clip.id || `clip_${index + 1}`);
         // Nodes 2.0 uses the wheel over the canvas for graph zoom. Mark only
         // the prompt textarea as a wheel-capturing DOM control so scrolling
         // inside a long prompt stays inside the prompt instead of zooming the graph.
@@ -4817,7 +4884,9 @@ function render(node, runtime) {
             updateHidden(node, runtime);
             // Do not rebuild the DOM while typing: that would steal focus.
         });
-        prompt.addEventListener("blur", () => render(node, runtime));
+        // The input handler already synchronizes clip.prompt. Re-rendering the
+        // whole node on blur destroyed/recreated this textarea and reset its
+        // native scroll position every time the user clicked elsewhere.
         card.appendChild(prompt);
 
         clip.loras = normalizeClipLoras(clip.loras, clip.lora);
@@ -5243,6 +5312,7 @@ function render(node, runtime) {
         foot.append(validateLabel, infoWrap);
         card.appendChild(foot);
         cards.appendChild(card);
+        restorePromptUiState(prompt, runtime, clip.id);
     });
 
     // Nodes 2.0 can recompute the DOM-widget grid after the Extender rebuilds
@@ -5915,6 +5985,9 @@ function buildUi(node) {
         syncingFl2vaScroll: false,
         continuitySignatures: new Map(),
         continuitySignatureRequests: new Set(),
+        // UI-only textarea state. render() rebuilds cards frequently during a
+        // run; keep prompt scroll/caret/focus stable across those rebuilds.
+        promptUiState: new Map(),
         modeValidationState: {
             [validationStateKey(state)]: new Map(
                 (state.clips || []).map((clip) => [String(clip.id), Boolean(clip.validated)])
