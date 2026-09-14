@@ -6,6 +6,15 @@ The node combines **Ref2VA conditioning, Motion Context, disk caching, multi-cli
 
 ---
 
+## 🆕 v2.7.7 — Full Batch Autosave
+
+- Optional automatic `.ext` project save after a successful **Full Batch**
+- Supports **Ref2VA Motion ON/OFF** and **FL2VA**
+- Preserves the **actual generation seed** and project settings
+- Clip-by-Clip behavior remains unchanged
+
+---
+
 ### 🆕 v2.7.5 — New Project button
 
 Added a new **New Project** button to quickly start from a completely clean state.
