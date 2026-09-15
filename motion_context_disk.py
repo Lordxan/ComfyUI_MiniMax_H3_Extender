@@ -61,7 +61,7 @@ from .motion_context_ram import (
     _streams_from_latent,
 )
 
-BUILD = "motion-context-disk-v2.7.10"
+BUILD = "motion-context-disk-v2.7.11"
 PREVIEW_AUDIO_MODE = "pcm_single_aac_gain_chain_v3_entry_ramp"
 CACHE_VERSION = 12
 PREVIEW_ROTATION_SLOTS = 3
@@ -4065,7 +4065,7 @@ def _restore_cached_preview_without_decode(owner_id, final_id, generation_mode="
         )
 
         preview_path = _reserve_preview_temp_path(final_id)
-        os.replace(temp_preview, preview_path)
+        shutil.move(temp_preview, preview_path)
 
         return {
             "path": preview_path,
