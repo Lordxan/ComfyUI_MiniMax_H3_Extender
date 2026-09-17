@@ -2491,6 +2491,40 @@ function openReferenceEditor(node, runtime, slotIndex, ref, target = null) {
     document.body.appendChild(overlay);
 }
 
+function hasSystemFileDragPayload(event) {
+    const transfer = event?.dataTransfer;
+    if (!transfer) return false;
+
+    // During dragover Firefox/Windows may intentionally keep dataTransfer.files
+    // empty until the actual drop. The Files type is the reliable signal that
+    // an operating-system file drag is crossing this slot.
+    const types = Array.from(transfer.types || []);
+    return types.includes("Files");
+}
+
+function singleSystemImageFileFromDropEvent(event) {
+    const transfer = event?.dataTransfer;
+    if (!transfer) return null;
+
+    const files = Array.from(transfer.files || []);
+    if (files.length !== 1) return null;
+
+    // External file drags expose the native Files payload. Internal ComfyUI
+    // drags are deliberately unsupported here; they use their own payloads.
+    const types = Array.from(transfer.types || []);
+    if (types.length && !types.includes("Files")) return null;
+
+    const items = Array.from(transfer.items || []);
+    if (items.length && (items.length !== 1 || String(items[0]?.kind || "") !== "file")) return null;
+
+    const file = files[0];
+    const mime = String(file?.type || "").toLowerCase();
+    const name = String(file?.name || "");
+    if (!mime.startsWith("image/") && !/\.(png|jpe?g|webp|bmp|tiff?)$/i.test(name)) return null;
+
+    return file;
+}
+
 async function uploadReference(node, runtime, slotIndex, file) {
     if (!node || !runtime || !file) return;
     if (projectBusy(runtime)) {
@@ -3971,6 +4005,43 @@ function renderReferences(node, runtime) {
         }
         slot.appendChild(thumb);
 
+        // Global-reference drag & drop is intentionally only another entry point
+        // into uploadReference(): one native image file from the operating system
+        // onto one explicit slot. No slot remapping or alternate ref logic exists.
+        const resetDropHighlight = () => {
+            thumb.style.borderColor = "rgba(255,255,255,.15)";
+            thumb.style.background = "rgba(0,0,0,.24)";
+        };
+        slot.addEventListener("dragover", (event) => {
+            // Firefox does not necessarily expose dataTransfer.files until drop.
+            // Accept the native Files payload here so the browser cannot navigate
+            // away from ComfyUI when the user releases the image over the slot.
+            if (!hasSystemFileDragPayload(event)) return;
+            event.preventDefault();
+            event.stopPropagation();
+            if (load.disabled) return;
+            if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+            thumb.style.borderColor = "rgba(150,205,255,.95)";
+            thumb.style.background = "rgba(70,120,175,.22)";
+        });
+        slot.addEventListener("dragleave", (event) => {
+            if (event.relatedTarget && slot.contains?.(event.relatedTarget)) return;
+            resetDropHighlight();
+        });
+        slot.addEventListener("drop", async (event) => {
+            if (!hasSystemFileDragPayload(event)) return;
+            // Always consume an operating-system file drop over a Global Ref slot.
+            // Validation still happens below, so multi-file/non-image drops do
+            // nothing instead of triggering the browser's native file navigation.
+            event.preventDefault();
+            event.stopPropagation();
+            resetDropHighlight();
+            if (load.disabled) return;
+            const file = singleSystemImageFileFromDropEvent(event);
+            if (!file) return;
+            await uploadReference(node, runtime, index, file);
+        });
+
         const meta = document.createElement("div");
         meta.style.marginTop = "1px";
         meta.style.fontSize = "9px";
@@ -4258,6 +4329,40 @@ function renderFl2vaFrames(node, runtime) {
                 thumb.appendChild(empty);
             }
             slot.appendChild(thumb);
+
+            // FL2VA First/Last drag & drop is only another entry point into
+            // uploadClipFrame(): one native image file from the operating system
+            // onto one explicit First/Last slot. Guides and internal ComfyUI drags
+            // remain unchanged and unsupported here.
+            const resetDropHighlight = () => {
+                thumb.style.borderColor = "rgba(255,255,255,.15)";
+                thumb.style.background = "rgba(0,0,0,.24)";
+            };
+            slot.addEventListener("dragover", (event) => {
+                // Firefox may keep dataTransfer.files empty until drop; the Files
+                // type is enough to consume the native drag and prevent navigation.
+                if (!hasSystemFileDragPayload(event)) return;
+                event.preventDefault();
+                event.stopPropagation();
+                if (load.disabled) return;
+                if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+                thumb.style.borderColor = "rgba(150,205,255,.95)";
+                thumb.style.background = "rgba(70,120,175,.22)";
+            });
+            slot.addEventListener("dragleave", (event) => {
+                if (event.relatedTarget && slot.contains?.(event.relatedTarget)) return;
+                resetDropHighlight();
+            });
+            slot.addEventListener("drop", async (event) => {
+                if (!hasSystemFileDragPayload(event)) return;
+                event.preventDefault();
+                event.stopPropagation();
+                resetDropHighlight();
+                if (load.disabled) return;
+                const file = singleSystemImageFileFromDropEvent(event);
+                if (!file) return;
+                await uploadClipFrame(node, runtime, clipIndex, kind, file);
+            });
 
             const meta = document.createElement("div");
             meta.style.marginTop = "1px";
