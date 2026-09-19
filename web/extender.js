@@ -104,6 +104,7 @@ const FINAL_PROJECT_WIDGETS = [
     "preset",
     "audio_bitrate",
     "auto_save_project",
+    "save_individual_clips",
 ];
 
 function boolValue(value, defaultValue = true) {
@@ -3559,6 +3560,9 @@ function applyProjectPayload(node, runtime, projectPayload) {
         // Older projects predate autosave: loading them keeps it opt-in.
         if (!Object.prototype.hasOwnProperty.call(finalSettings, "auto_save_project")) {
             setWidgetValue(finalNode, "auto_save_project", false);
+        }
+        if (!Object.prototype.hasOwnProperty.call(finalSettings, "save_individual_clips")) {
+            setWidgetValue(finalNode, "save_individual_clips", false);
         }
         for (const name of FINAL_PROJECT_WIDGETS) {
             if (Object.prototype.hasOwnProperty.call(finalSettings, name)) {
