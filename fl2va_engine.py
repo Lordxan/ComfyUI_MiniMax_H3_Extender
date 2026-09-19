@@ -1560,6 +1560,7 @@ def export_fl2va_final(
     prompt=None,
     require_continuity=True,
     project_autosave_settings=None,
+    save_individual_clips=False,
 ):
     """Decode FL2VA plans as independent hard cuts.
 
@@ -1750,7 +1751,12 @@ def export_fl2va_final(
     # sidecars and muxes audio; compressed video is never transcoded again.
     # ------------------------------------------------------------------
     progress = d._FinalDecodeNativeProgress(
-        unique_id, total=max(8, 5 + len(segments) * 2)
+        unique_id,
+        total=max(
+            8,
+            5 + len(segments) * 2
+            + (len(segments) if bool(save_individual_clips) else 0),
+        ),
     )
     requested_profile = d.normalize_full_batch_export_profile({
         "codec": codec, "crf": crf, "preset": preset,
@@ -1880,7 +1886,7 @@ def export_fl2va_final(
     preview_path = d._publish_full_preview(committed_path, unique_id)
     extension = d._full_batch_export_profile_extension(export_profile)
     output_path = d._next_output_path(out_dir, filename_prefix, extension)
-    final_video_mode = d._export_final_from_exact_segment_caches(
+    final_video_mode, individual_export_info = d._export_final_from_exact_segment_caches(
         ffmpeg=ffmpeg,
         segment_paths=exact_segment_paths,
         data_path=data_path,
@@ -1890,6 +1896,10 @@ def export_fl2va_final(
         export_profile=export_profile,
         audio_bitrate=audio_bitrate,
         token=token,
+        save_individual_clips=bool(save_individual_clips),
+        workflow=workflow,
+        prompt=prompt,
+        progress=progress,
     )
 
     d._embed_final_metadata_in_place(output_path, workflow=workflow, prompt=prompt)
@@ -1908,6 +1918,7 @@ def export_fl2va_final(
             "h3_video": [item],
             "h3_preview_info": [{
                 **project_autosave_info,
+                **individual_export_info,
                 "mode": "fl2va_full_batch_incremental",
                 "clip": len(segments),
                 "preview_frames": expected_frames,
