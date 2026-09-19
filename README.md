@@ -6,6 +6,25 @@ The node combines **Ref2VA conditioning, Motion Context, disk caching, multi-cli
 
 ---
 
+## 🆕 v2.8.0 — Optional individual Full Batch clip export
+
+Full Batch can now optionally save each final clip as a separate video file using the new **Save Individual Clips** option in **Final Decode / Preview**.
+
+The option is disabled by default, so the existing Full Batch workflow remains unchanged unless explicitly enabled.
+
+When enabled, individual clips are exported only after all normal processing is complete. They use the same final video segments as the assembled output, including seam correction, per-clip color adjustments and FL2VA visible-frame trimming/handoffs.
+
+Audio is captured during the same final PCM assembly pass used for the complete video, so no additional audio reconstruction pass is required.
+
+No additional sampling or VideoVAE decode is introduced. Individual video streams are reused with stream-copy and saved in a dedicated folder beside the final assembled video.
+
+Supported in:
+- Ref2VA Motion ON
+- Ref2VA Motion OFF
+- FL2VA
+
+---
+
 ## 🆕 v2.7.7 — Full Batch Autosave
 
 - Optional automatic `.ext` project save after a successful **Full Batch**
